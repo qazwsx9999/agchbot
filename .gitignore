@@ -1,0 +1,47 @@
+# Build directories
+build/
+build_cuda/
+bin/
+out/
+
+# Compiled Object files, libraries, executables
+*.o
+*.obj
+*.so
+*.dylib
+*.dll
+*.lib
+*.a
+*.exe
+*.pdb
+*.exp
+*.ilk
+
+# Checkpoints, models, large replay buffers
+checkpoints/
+*.pt
+*.opt
+*.bin
+
+# CMake build outputs and cache
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+*.cmake
+
+# IDEs and Editors
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+*.userosv
+*.sln.docstates
+CMakeSettings.json
+
+# System & temporary files
+*.log
+*.tmp
+.DS_Store
+Thumbs.db
