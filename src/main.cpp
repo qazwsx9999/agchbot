@@ -161,7 +161,8 @@ int main(int argc, char* argv[]) {
     if (want_cuda && torch::cuda::is_available()) {
         device = torch::Device(torch::kCUDA);
         cfg.device = "cuda";
-        std::cout << "  [System] Using GPU (CUDA Acceleration Enabled)\n";
+        torch::set_num_threads(1);
+        std::cout << "  [System] Using GPU (CUDA Acceleration Enabled, LibTorch threads=1)\n";
     } else {
         if (cfg.device == "cuda") {
             std::cout << "  [WARNING] CUDA not available - falling back to CPU.\n";
@@ -169,8 +170,12 @@ int main(int argc, char* argv[]) {
         cfg.device = "cpu";
         int threads = (cfg.num_workers > 0) ? cfg.num_workers : static_cast<int>(std::thread::hardware_concurrency());
         if (threads <= 0) threads = 4;
-        torch::set_num_threads(threads);
-        std::cout << "  [System] Using CPU (" << threads << " threads configured for LibTorch)\n";
+        if (cfg.select_workers > 1 || cfg.search_threads > 1) {
+            torch::set_num_threads(1);
+        } else {
+            torch::set_num_threads(threads);
+        }
+        std::cout << "  [System] Using CPU (" << threads << " worker threads configured)\n";
     }
 
     fs::create_directories(cfg.checkpoint_dir);

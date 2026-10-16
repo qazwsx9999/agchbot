@@ -5,6 +5,13 @@
 
 #include <c10/core/DeviceGuard.h>
 
+#if __has_include(<ATen/autocast_mode.h>)
+#include <ATen/autocast_mode.h>
+#define HAS_AUTOCAST 1
+#else
+#define HAS_AUTOCAST 0
+#endif
+
 #include <iostream>
 #include <iomanip>
 #include <cmath>
@@ -86,6 +93,41 @@ void backprop_path(std::vector<MCTSNode*>& path, float value) {
         value = -value;
     }
 }
+
+void apply_virtual_loss(const std::vector<MCTSNode*>& path) {
+    for (size_t i = 0; i < path.size(); ++i) {
+        path[i]->visit_count += 1;
+        if (i > 0) {
+            // Node path[i] was chosen by path[i-1].
+            // In select_child_puct: q = -child->q_value() = -child->value_sum / child->visit_count.
+            // Adding +1.0f to child->value_sum makes q = -1.0f (virtual loss from choosing player's view),
+            // discouraging select_child_puct from picking this child again during the current wave.
+            add_value_sum(path[i], 1.0f);
+        }
+    }
+}
+
+void revert_virtual_loss(const std::vector<MCTSNode*>& path) {
+    for (size_t i = 0; i < path.size(); ++i) {
+        path[i]->visit_count -= 1;
+        if (i > 0) {
+            add_value_sum(path[i], -1.0f);
+        }
+    }
+}
+
+void revert_virtual_loss_and_backprop(std::vector<MCTSNode*>& path, float val) {
+    revert_virtual_loss(path);
+    backprop_path(path, val);
+}
+
+struct LeafEval {
+    MCTSNode* leaf_node = nullptr;
+    std::vector<int> actions;
+    std::vector<std::vector<MCTSNode*>> paths;
+    float planes[NUM_CHANNELS * 64];
+    int batch_idx = -1;
+};
 
 } // anonymous namespace
 
@@ -175,6 +217,23 @@ SelfPlayStats SelfPlayEngine::generate_games_batched(ChessNet& model, ReplayBuff
               << active_games.size() << " batched parallel games on "
               << (device_.is_cuda() ? "CUDA" : "CPU") << ") ...\n";
 
+    int sel_workers = config_.select_workers;
+    if (sel_workers <= 0) {
+        int hw = static_cast<int>(std::thread::hardware_concurrency());
+        if (hw <= 0) hw = 4;
+        sel_workers = std::max(1, hw / std::max(1, config_.num_gpus));
+        sel_workers = std::min(sel_workers, batch_size);
+    }
+    ParallelRunner runner(sel_workers);
+
+    constexpr int kVirtualLossBatch = 8;
+    const size_t max_total_leaves = static_cast<size_t>(batch_size) * kVirtualLossBatch;
+    std::vector<float> batch_planes(max_total_leaves * NUM_CHANNELS * BOARD_SIZE * BOARD_SIZE);
+    std::vector<std::vector<LeafEval>> per_game_leaves(batch_size);
+    for (auto& pgl : per_game_leaves) {
+        pgl.reserve(kVirtualLossBatch);
+    }
+
     while (!active_games.empty()) {
         // ─────────────────────────────────────────────────────────────
         // 1. Batched Root Expansion
@@ -188,8 +247,6 @@ SelfPlayStats SelfPlayEngine::generate_games_batched(ChessNet& model, ReplayBuff
 
         if (!need_root_expansion.empty()) {
             size_t n_exp = need_root_expansion.size();
-            std::vector<float> batch_planes(n_exp * NUM_CHANNELS * BOARD_SIZE * BOARD_SIZE);
-
             for (size_t i = 0; i < n_exp; ++i) {
                 encode_board(need_root_expansion[i]->board, &batch_planes[i * NUM_CHANNELS * 64]);
             }
@@ -199,8 +256,19 @@ SelfPlayStats SelfPlayEngine::generate_games_batched(ChessNet& model, ReplayBuff
                 {static_cast<int64_t>(n_exp), NUM_CHANNELS, BOARD_SIZE, BOARD_SIZE}, options)
                 .to(device_);
 
+#if HAS_AUTOCAST
+            bool use_autocast = device_.is_cuda();
+            if (use_autocast) {
+                at::autocast::set_autocast_enabled(at::kCUDA, true);
+            }
+#endif
             auto [logits, _] = model->forward(tensor);
-            auto probs = torch::softmax(logits, 1).to(torch::kCPU);
+#if HAS_AUTOCAST
+            if (use_autocast) {
+                at::autocast::set_autocast_enabled(at::kCUDA, false);
+            }
+#endif
+            auto probs = torch::softmax(logits.to(torch::kFloat32), 1).to(torch::kCPU);
             float* p_ptr = probs.data_ptr<float>();
 
             for (size_t i = 0; i < n_exp; ++i) {
@@ -232,115 +300,138 @@ SelfPlayStats SelfPlayEngine::generate_games_batched(ChessNet& model, ReplayBuff
         }
 
         // ─────────────────────────────────────────────────────────────
-        // 2. Batched Parallel MCTS Simulations
+        // 2. Batched Parallel MCTS Simulations (Multi-Leaf Waves)
         // ─────────────────────────────────────────────────────────────
-        // Shared worker pool reused across all three phases (select-down,
-        // encode, post-GPU expand+backprop) so no per-simulation thread
-        // creation happens.
-        int sel_workers = config_.select_workers;
-        if (sel_workers <= 0) {
-            int hw = static_cast<int>(std::thread::hardware_concurrency());
-            if (hw <= 0) hw = 4;
-            sel_workers = std::max(1, hw / std::max(1, config_.num_gpus));
-            sel_workers = std::min(sel_workers, static_cast<int>(active_games.size()));
-        }
-        ParallelRunner runner(sel_workers);
+        for (int sim = 0; sim < config_.num_simulations; ) {
+            int wave_sims = std::min(kVirtualLossBatch, config_.num_simulations - sim);
+            sim += wave_sims;
 
-        for (int sim = 0; sim < config_.num_simulations; ++sim) {
-            struct LeafEval {
-                MCTSNode* leaf_node;
-                Board scratch_board;
-                std::vector<MCTSNode*> path;
-                std::vector<Move> legal_moves;
-            };
-
-            std::vector<LeafEval> to_eval;
-            to_eval.reserve(active_games.size());
-            std::mutex eval_mutex;
-
-            // Phase A: select-down across worker threads. A node with children
-            // is guaranteed non-terminal, so is_game_over_fast() (draw rules
-            // only) replaces the expensive full check; legal moves are computed
-            // once at the leaf and cached for the post-GPU expansion.
+            // Phase A: Select-down + virtual loss + inline board encoding per game
             runner.run(static_cast<int>(active_games.size()), [&](int gi) {
+                per_game_leaves[gi].clear();
                 auto& g = active_games[gi];
                 if (!g->root || g->root->children.empty()) return;
 
-                MCTSNode* node = g->root.get();
-                Board scratch = g->board;
-                std::vector<MCTSNode*> path;
-                path.push_back(node);
+                for (int s = 0; s < wave_sims; ++s) {
+                    thread_local Board scratch;
+                    scratch.copy_from(g->board);
 
-                while (!node->children.empty() && !scratch.is_game_over_fast()) {
-                    auto [action, child] = select_child_puct(node, config_.c_puct);
-                    if (!child) break;
-                    scratch.make_move(decode_action(action, scratch));
-                    node = child;
+                    MCTSNode* node = g->root.get();
+                    std::vector<MCTSNode*> path;
                     path.push_back(node);
-                }
 
-                if (scratch.is_game_over_fast()) {
-                    backprop_path(path, 0.0f);
-                } else if (node->children.empty()) {
-                    auto legal = scratch.generate_legal_moves();
-                    if (legal.empty()) {
-                        // Terminal: checkmate -> -1.0f (side to move lost), stalemate -> 0.0f (draw)
-                        float val = scratch.is_in_check() ? -1.0f : 0.0f;
-                        backprop_path(path, val);
+                    while (!node->children.empty() && !scratch.is_game_over_fast()) {
+                        auto [action, child] = select_child_puct(node, config_.c_puct);
+                        if (!child) break;
+                        scratch.make_move(decode_action(action, scratch));
+                        node = child;
+                        path.push_back(node);
+                    }
+
+                    apply_virtual_loss(path);
+
+                    if (scratch.is_game_over_fast()) {
+                        revert_virtual_loss_and_backprop(path, 0.0f);
+                        continue;
+                    }
+
+                    // Check if this leaf was already queued in this wave for this game
+                    LeafEval* existing = nullptr;
+                    for (auto& le : per_game_leaves[gi]) {
+                        if (le.leaf_node == node) {
+                            existing = &le;
+                            break;
+                        }
+                    }
+
+                    if (existing != nullptr) {
+                        existing->paths.push_back(std::move(path));
+                        continue;
+                    }
+
+                    if (node->children.empty()) {
+                        auto legal = scratch.generate_legal_moves();
+                        if (legal.empty()) {
+                            // Terminal: checkmate -> -1.0f (side to move lost), stalemate -> 0.0f (draw)
+                            float val = scratch.is_in_check() ? -1.0f : 0.0f;
+                            revert_virtual_loss_and_backprop(path, val);
+                            continue;
+                        }
+
+                        LeafEval le;
+                        le.leaf_node = node;
+                        le.actions.reserve(legal.size());
+                        for (const auto& m : legal) {
+                            le.actions.push_back(encode_action(m, scratch));
+                        }
+                        encode_board(scratch, le.planes);
+                        le.paths.push_back(std::move(path));
+                        per_game_leaves[gi].push_back(std::move(le));
                     } else {
-                        std::lock_guard<std::mutex> lock(eval_mutex);
-                        to_eval.push_back({node, scratch, std::move(path), std::move(legal)});
+                        revert_virtual_loss_and_backprop(path, node->q_value());
                     }
                 }
             });
 
-            if (!to_eval.empty()) {
-                size_t n_leaves = to_eval.size();
-                std::vector<float> batch_planes(n_leaves * NUM_CHANNELS * BOARD_SIZE * BOARD_SIZE);
+            // Flatten leaves across all active games into contiguous batch_planes
+            int total_leaves = 0;
+            for (size_t gi = 0; gi < active_games.size(); ++gi) {
+                for (auto& le : per_game_leaves[gi]) {
+                    le.batch_idx = total_leaves;
+                    std::memcpy(
+                        &batch_planes[total_leaves * NUM_CHANNELS * BOARD_SIZE * BOARD_SIZE],
+                        le.planes,
+                        NUM_CHANNELS * BOARD_SIZE * BOARD_SIZE * sizeof(float)
+                    );
+                    total_leaves++;
+                }
+            }
 
-                // Phase B: encode all leaf boards in parallel.
-                runner.run(static_cast<int>(n_leaves), [&](int i) {
-                    encode_board(to_eval[i].scratch_board,
-                                 &batch_planes[i * NUM_CHANNELS * BOARD_SIZE * BOARD_SIZE]);
-                });
-
+            if (total_leaves > 0) {
                 auto options = torch::TensorOptions().dtype(torch::kFloat32);
                 auto tensor = torch::from_blob(batch_planes.data(),
-                    {static_cast<int64_t>(n_leaves), NUM_CHANNELS, BOARD_SIZE, BOARD_SIZE}, options)
+                    {static_cast<int64_t>(total_leaves), NUM_CHANNELS, BOARD_SIZE, BOARD_SIZE}, options)
                     .to(device_);
 
+#if HAS_AUTOCAST
+                bool use_autocast = device_.is_cuda();
+                if (use_autocast) {
+                    at::autocast::set_autocast_enabled(at::kCUDA, true);
+                }
+#endif
                 auto [logits, values] = model->forward(tensor);
-                auto probs = torch::softmax(logits, 1).to(torch::kCPU);
-                auto vals = values.to(torch::kCPU);
+#if HAS_AUTOCAST
+                if (use_autocast) {
+                    at::autocast::set_autocast_enabled(at::kCUDA, false);
+                }
+#endif
+
+                auto probs = torch::softmax(logits.to(torch::kFloat32), 1).to(torch::kCPU);
+                auto vals = values.to(torch::kFloat32).to(torch::kCPU);
 
                 float* p_ptr = probs.data_ptr<float>();
                 float* v_ptr = vals.data_ptr<float>();
 
-                // Phase C: expand leaves + backprop in parallel. Each leaf
-                // belongs to a different game's tree, so no locking is needed.
-                runner.run(static_cast<int>(n_leaves), [&](int i) {
-                    auto& leaf = to_eval[i];
-                    float* leaf_policy = &p_ptr[i * NUM_ACTIONS];
-                    float val = v_ptr[i];
+                // Phase C: Expand leaves + revert virtual loss + backprop per game (partitioned by gi)
+                runner.run(static_cast<int>(active_games.size()), [&](int gi) {
+                    for (auto& leaf : per_game_leaves[gi]) {
+                        int b_idx = leaf.batch_idx;
+                        float* leaf_policy = &p_ptr[b_idx * NUM_ACTIONS];
+                        float val = v_ptr[b_idx];
 
-                    if (!leaf.legal_moves.empty()) {
-                        std::vector<int> actions;
-                        actions.reserve(leaf.legal_moves.size());
-                        float prior_sum = 0.0f;
-
-                        for (const auto& m : leaf.legal_moves) {
-                            int act = encode_action(m, leaf.scratch_board);
-                            actions.push_back(act);
-                            prior_sum += leaf_policy[act];
+                        if (!leaf.actions.empty()) {
+                            float prior_sum = 0.0f;
+                            for (int act : leaf.actions) prior_sum += leaf_policy[act];
+                            for (int act : leaf.actions) {
+                                float prior = (prior_sum > 0.0f) ? (leaf_policy[act] / prior_sum) : (1.0f / leaf.actions.size());
+                                leaf.leaf_node->children[act] = std::make_unique<MCTSNode>(prior);
+                            }
                         }
 
-                        for (int act : actions) {
-                            float prior = (prior_sum > 0.0f) ? (leaf_policy[act] / prior_sum) : (1.0f / actions.size());
-                            leaf.leaf_node->children[act] = std::make_unique<MCTSNode>(prior);
+                        for (auto& p : leaf.paths) {
+                            revert_virtual_loss_and_backprop(p, val);
                         }
                     }
-
-                    backprop_path(leaf.path, val);
                 });
             }
         }
@@ -561,11 +652,16 @@ SelfPlayStats SelfPlayEngine::generate_games_multi_gpu(
     std::vector<std::thread> threads;
     threads.reserve(n_dev);
 
+    Config dev_cfg = cfg;
+    if (cfg.select_workers > 0) {
+        dev_cfg.select_workers = std::max(1, cfg.select_workers / n_dev);
+    }
+
     for (int d = 0; d < n_dev; ++d) {
         int share = base + (d == 0 ? rem : 0);
         threads.emplace_back([&, d, share]() {
             c10::DeviceGuard guard(devices[d]);
-            SelfPlayEngine eng(cfg, devices[d]);
+            SelfPlayEngine eng(dev_cfg, devices[d]);
             per[d] = eng.generate_games(models[d], buffer, share);
             std::lock_guard<std::mutex> lock(log_mutex);
             std::cout << "    [GPU" << d << "] done: W" << per[d].white_wins
