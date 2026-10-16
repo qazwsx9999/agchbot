@@ -14,13 +14,6 @@ namespace az {
 
 namespace {
 
-// Terminal value for a finished game from the side-to-move's view
-// (mirrors MCTS::terminal_value).
-float terminal_value(const Board& board) {
-    std::string res = board.result();
-    if (res == "1/2-1/2") return 0.0f;
-    return -1.0f; // side to move has lost
-}
 
 // Root Dirichlet noise (identical to MCTS::inject_noise / self_play's helper).
 void inject_dirichlet_noise(MCTSNode* root, float alpha, float epsilon) {
@@ -259,33 +252,40 @@ void ParallelMCTS::worker_loop(
 
         float value = 0.0f;
         if (scratch.is_game_over_fast()) {
-            value = terminal_value(scratch);
+            value = 0.0f;
         } else if (node->expand_state.load(std::memory_order_acquire) == 0) {
             // Unexpanded leaf: try to own the expansion.
             uint8_t expected = 0;
             if (node->expand_state.compare_exchange_strong(
                     expected, 1,
                     std::memory_order_acquire, std::memory_order_acquire)) {
-                // We own the expansion — compute legal moves, actions, and
-                // encoding once on this worker, then submit to the eval queue.
-                auto req = std::make_unique<EvalRequest>();
-                req->leaf = node;
-                req->board = std::make_shared<Board>(scratch);
-                req->legal_moves = scratch.generate_legal_moves();
-                req->actions.reserve(req->legal_moves.size());
-                for (const auto& m : req->legal_moves) {
-                    req->actions.push_back(encode_action(m, scratch));
+                auto legal = scratch.generate_legal_moves();
+                if (legal.empty()) {
+                    // Terminal: checkmate -> -1.0f (side to move lost), stalemate -> 0.0f (draw)
+                    value = scratch.is_in_check() ? -1.0f : 0.0f;
+                    node->expand_state.store(0, std::memory_order_release);
+                } else {
+                    // We own the expansion — compute actions and
+                    // encoding once on this worker, then submit to the eval queue.
+                    auto req = std::make_unique<EvalRequest>();
+                    req->leaf = node;
+                    req->board = std::make_shared<Board>(scratch);
+                    req->actions.reserve(legal.size());
+                    for (const auto& m : legal) {
+                        req->actions.push_back(encode_action(m, scratch));
+                    }
+                    req->legal_moves = std::move(legal);
+                    auto promise = std::make_shared<std::promise<EvalResult>>();
+                    auto future = promise->get_future();
+                    req->promise = promise;
+                    {
+                        std::lock_guard<std::mutex> lock(queue_mutex_);
+                        queue_.push_back(std::move(req));
+                    }
+                    queue_cv_.notify_one();
+                    EvalResult res = future.get();
+                    value = res.value;
                 }
-                auto promise = std::make_shared<std::promise<EvalResult>>();
-                auto future = promise->get_future();
-                req->promise = promise;
-                {
-                    std::lock_guard<std::mutex> lock(queue_mutex_);
-                    queue_.push_back(std::move(req));
-                }
-                queue_cv_.notify_one();
-                EvalResult res = future.get();
-                value = res.value;
             } else {
                 // Someone else is expanding the same leaf: wait briefly then
                 // this sim counts as done (a cheap, deadlock-free choice —

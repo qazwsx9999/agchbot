@@ -280,9 +280,7 @@ SelfPlayStats SelfPlayEngine::generate_games_batched(ChessNet& model, ReplayBuff
                 }
 
                 if (scratch.is_game_over_fast()) {
-                    std::string res = scratch.result();
-                    float val = (res == "1/2-1/2") ? 0.0f : -1.0f;
-                    backprop_path(path, val);
+                    backprop_path(path, 0.0f);
                 } else if (node->children.empty()) {
                     auto legal = scratch.generate_legal_moves();
                     if (legal.empty()) {

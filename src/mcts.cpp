@@ -52,17 +52,16 @@ std::vector<float> MCTS::search(
             path.push_back(node);
         }
 
-        // EVALUATE — compute legal moves once: needed for both the terminal
-        // test and (if we expand) inserting children, avoiding 2-3 extra
-        // generate_legal_moves() calls on the same board.
-        auto legal = scratch.generate_legal_moves();
         float value = 0.0f;
-        if (scratch.is_game_over_fast() || legal.empty()) {
-            // Draw by rules -> 0; mate/stalemate -> -1 iff in check (side to
-            // move lost), else 0.
-            value = (legal.empty() && scratch.is_in_check()) ? -1.0f : 0.0f;
+        if (scratch.is_game_over_fast()) {
+            value = 0.0f;
         } else if (node->children.empty()) {
-            value = expand(node, scratch, legal, model, device);
+            auto legal = scratch.generate_legal_moves();
+            if (legal.empty()) {
+                value = scratch.is_in_check() ? -1.0f : 0.0f;
+            } else {
+                value = expand(node, scratch, legal, model, device);
+            }
         }
 
         // BACKPROPAGATE
