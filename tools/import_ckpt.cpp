@@ -82,6 +82,15 @@ int main(int argc, char** argv) {
             ++skipped;
             continue;
         }
+        if (name == "conv_in.weight" && shape.size() == 4 && shape[1] == 18 && dst->size(1) == 21) {
+            std::cout << "  [weight-surgery] upgrading conv_in.weight from 18 to 21 channels\n";
+            torch::Tensor src = torch::from_blob(
+                data.data(), shape, torch::TensorOptions().dtype(torch::kFloat32)).clone();
+            dst->zero_();
+            dst->slice(1, 0, 18).copy_(src);
+            ++copied;
+            continue;
+        }
         if (dst->numel() != numel) {
             std::cerr << "  [skip] numel mismatch for '" << name << "' ("
                       << dst->numel() << " vs " << numel << ")\n";

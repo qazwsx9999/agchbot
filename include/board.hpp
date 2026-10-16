@@ -75,6 +75,7 @@ public:
     std::string result() const; // "1-0", "0-1", "1/2-1/2", or "*"
     bool is_checkmate() const;
     bool is_stalemate() const;
+    int repetition_count() const;
     bool is_threefold_repetition() const;
     bool is_insufficient_material() const;
 

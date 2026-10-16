@@ -87,8 +87,8 @@ void Trainer::save_checkpoint(const std::string& path, int iteration, int total_
 int Trainer::load_checkpoint(const std::string& path, int& out_total_games) {
     try {
         torch::serialize::InputArchive archive;
-        archive.load_from(path);
-        model_->load(archive);
+        archive.load_from(path, device_);
+        model_->load_weights(archive);
         model_->to(device_);
 
         // Re-bind optimizer with the loaded parameters on the target device
@@ -111,7 +111,7 @@ int Trainer::load_checkpoint(const std::string& path, int& out_total_games) {
         if (std::ifstream(opt_path).good()) {
             try {
                 torch::serialize::InputArchive opt_archive;
-                opt_archive.load_from(opt_path);
+                opt_archive.load_from(opt_path, device_);
                 optimizer_->load(opt_archive);
             } catch (const std::exception& e) {
                 std::cerr << "Warning: Could not restore optimizer momentum: " << e.what() << "\n";

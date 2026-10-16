@@ -24,6 +24,8 @@ class ChessNetImpl : public torch::nn::Module {
 public:
     explicit ChessNetImpl(const Config& cfg);
     std::pair<torch::Tensor, torch::Tensor> forward(torch::Tensor x);
+    void load(torch::serialize::InputArchive& archive) override;
+    void load_weights(torch::serialize::InputArchive& archive) { load(archive); }
 
 private:
     torch::nn::Conv2d conv_in{nullptr};

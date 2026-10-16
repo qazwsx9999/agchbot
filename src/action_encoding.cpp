@@ -38,7 +38,7 @@ int get_underpromo_file_delta_idx(int df) {
 } // anonymous namespace
 
 void encode_board(const Board& board, float* out_planes) {
-    // Zero out all 18 * 8 * 8 = 1152 floats
+    // Zero out all 21 * 8 * 8 = 1344 floats
     std::memset(out_planes, 0, NUM_CHANNELS * 64 * sizeof(float));
 
     bool flip = (board.turn() == BLACK);
@@ -107,6 +107,28 @@ void encode_board(const Board& board, float* out_planes) {
         int r = rank_of(msq);
         int f = file_of(msq);
         out_planes[17 * 64 + r * 8 + f] = 1.0f;
+    }
+
+    // Plane 18: 1st repetition (repetition_count >= 1, i.e. 2nd occurrence)
+    if (board.repetition_count() >= 1) {
+        for (int sq = 0; sq < 64; ++sq) {
+            out_planes[18 * 64 + sq] = 1.0f;
+        }
+    }
+
+    // Plane 19: 2nd+ repetition (repetition_count >= 2, i.e. 3rd+ occurrence)
+    if (board.repetition_count() >= 2) {
+        for (int sq = 0; sq < 64; ++sq) {
+            out_planes[19 * 64 + sq] = 1.0f;
+        }
+    }
+
+    // Plane 20: 50-move rule clock normalized [0.0, 1.0]
+    float hm = std::min(1.0f, static_cast<float>(board.halfmove_clock()) / 100.0f);
+    if (hm > 0.0f) {
+        for (int sq = 0; sq < 64; ++sq) {
+            out_planes[20 * 64 + sq] = hm;
+        }
     }
 }
 

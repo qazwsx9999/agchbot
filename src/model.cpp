@@ -1,4 +1,5 @@
 #include "model.hpp"
+#include <iostream>
 
 namespace az {
 
@@ -60,6 +61,40 @@ std::pair<torch::Tensor, torch::Tensor> ChessNetImpl::forward(torch::Tensor x) {
     v = torch::tanh(value_fc2(v));
 
     return {p, v};
+}
+
+void ChessNetImpl::load(torch::serialize::InputArchive& archive) {
+    torch::NoGradGuard no_grad;
+
+    // 1. Load conv_in with backward-compatible weight surgery (18 -> 21 channels)
+    torch::serialize::InputArchive conv_archive;
+    if (archive.try_read("conv_in", conv_archive)) {
+        torch::Tensor saved_weight;
+        if (conv_archive.try_read("weight", saved_weight)) {
+            if (saved_weight.dim() == 4 && saved_weight.size(1) == 18 && conv_in->weight.size(1) == 21) {
+                std::cout << "[ChessNet] Upgrading 18-channel checkpoint to 21 channels: "
+                          << "preserving channels 0..17, zero-initializing repetition/halfmove planes 18..20.\n";
+                conv_in->weight.zero_();
+                conv_in->weight.slice(/*dim=*/1, /*start=*/0, /*end=*/18).copy_(
+                    saved_weight.to(conv_in->weight.device()));
+            } else {
+                conv_in->weight.copy_(saved_weight.to(conv_in->weight.device()));
+            }
+        }
+        torch::Tensor saved_bias;
+        if (conv_in->bias.defined() && conv_archive.try_read("bias", saved_bias)) {
+            conv_in->bias.copy_(saved_bias.to(conv_in->bias.device()));
+        }
+    }
+
+    // 2. Load all remaining submodules
+    for (auto& child : named_children()) {
+        if (child.key() == "conv_in") continue;
+        torch::serialize::InputArchive child_archive;
+        if (archive.try_read(child.key(), child_archive)) {
+            child.value()->load(child_archive);
+        }
+    }
 }
 
 } // namespace az

@@ -111,7 +111,7 @@ struct Move {
 };
 
 // ── AlphaZero Constants ──────────────────────────────────────────────
-constexpr int NUM_CHANNELS = 18;
+constexpr int NUM_CHANNELS = 21;
 constexpr int BOARD_SIZE = 8;
 constexpr int NUM_ACTIONS = 4672;
 

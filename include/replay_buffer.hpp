@@ -8,7 +8,7 @@
 namespace az {
 
 struct Sample {
-    std::vector<float> state;  // 18 * 8 * 8
+    std::vector<float> state;  // NUM_CHANNELS * 8 * 8 = 1344
     std::vector<float> policy; // 4672
     float value;               // in [-1, 1]
 };

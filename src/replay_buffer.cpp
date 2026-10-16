@@ -2,6 +2,7 @@
 #include <random>
 #include <fstream>
 #include <algorithm>
+#include <iostream>
 
 namespace az {
 
@@ -85,20 +86,51 @@ void ReplayBuffer::save(const std::string& filepath) const {
 
 bool ReplayBuffer::load(const std::string& filepath) {
     std::lock_guard<std::mutex> lock(mutex_);
-    std::ifstream in(filepath, std::ios::binary);
+    std::ifstream in(filepath, std::ios::binary | std::ios::ate);
     if (!in) return false;
+
+    size_t file_size = static_cast<size_t>(in.tellg());
+    in.seekg(0, std::ios::beg);
+
+    if (file_size < 2 * sizeof(size_t)) return false;
 
     size_t count = 0, cap = 0;
     in.read(reinterpret_cast<char*>(&count), sizeof(count));
     in.read(reinterpret_cast<char*>(&cap), sizeof(cap));
 
+    if (count == 0) return true;
+
+    size_t data_size = file_size - 2 * sizeof(size_t);
+    constexpr size_t kSample18Bytes = 18 * 64 * sizeof(float) + NUM_ACTIONS * sizeof(float) + sizeof(float); // 23300
+    constexpr size_t kSample21Bytes = 21 * 64 * sizeof(float) + NUM_ACTIONS * sizeof(float) + sizeof(float); // 24068
+
+    bool is_18_channels = false;
+    if (data_size == count * kSample18Bytes) {
+        is_18_channels = true;
+        std::cout << "[ReplayBuffer] Detected 18-channel replay buffer (" << count
+                  << " samples). Migrating to 21 channels on the fly.\n";
+    } else if (data_size == count * kSample21Bytes) {
+        is_18_channels = false;
+    } else {
+        std::cerr << "[ReplayBuffer] Warning: Unexpected replay buffer file size ("
+                  << file_size << " bytes for " << count << " samples). Discarding incompatible buffer.\n";
+        return false;
+    }
+
     if (count > capacity_) count = capacity_;
 
     for (size_t i = 0; i < count; ++i) {
         Sample s;
-        s.state.resize(NUM_CHANNELS * BOARD_SIZE * BOARD_SIZE);
+        s.state.assign(NUM_CHANNELS * BOARD_SIZE * BOARD_SIZE, 0.0f);
         s.policy.resize(NUM_ACTIONS);
-        in.read(reinterpret_cast<char*>(s.state.data()), s.state.size() * sizeof(float));
+
+        if (is_18_channels) {
+            in.read(reinterpret_cast<char*>(s.state.data()), 18 * 64 * sizeof(float));
+            // Channels 18..20 remain zero-initialized
+        } else {
+            in.read(reinterpret_cast<char*>(s.state.data()), NUM_CHANNELS * 64 * sizeof(float));
+        }
+
         in.read(reinterpret_cast<char*>(s.policy.data()), s.policy.size() * sizeof(float));
         in.read(reinterpret_cast<char*>(&s.value), sizeof(float));
         buffer_[i] = std::move(s);

@@ -19,10 +19,10 @@ int main() {
     auto moves = board.generate_legal_moves();
     std::cout << "2. Legal moves from starting position: " << moves.size() << " (Expected: 20)\n";
 
-    // Test 18-plane board encoding
-    float planes[18 * 64];
+    // Test 21-plane board encoding
+    float planes[az::NUM_CHANNELS * 64];
     az::encode_board(board, planes);
-    std::cout << "3. 18-plane state encoding completed successfully.\n";
+    std::cout << "3. 21-plane state encoding completed successfully.\n";
 
     // Test threefold repetition
     std::cout << "4. Testing Threefold Repetition...\n";

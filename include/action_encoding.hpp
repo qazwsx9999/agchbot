@@ -5,8 +5,8 @@
 
 namespace az {
 
-// Encodes a Board into 18 x 8 x 8 float planes from current player's perspective.
-// out_planes must point to a float buffer of size 18 * 8 * 8 = 1152 floats.
+// Encodes a Board into 21 x 8 x 8 float planes from current player's perspective.
+// out_planes must point to a float buffer of size 21 * 8 * 8 = 1344 floats.
 void encode_board(const Board& board, float* out_planes);
 
 // Encodes a legal Move into an action index [0, 4671].

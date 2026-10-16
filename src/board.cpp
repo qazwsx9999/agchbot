@@ -755,16 +755,19 @@ bool Board::is_insufficient_material() const {
     return false;
 }
 
-bool Board::is_threefold_repetition() const {
-    int count = 1; // Current position
+int Board::repetition_count() const {
+    int count = 0;
     int max_lookback = std::min(halfmove_clock_, static_cast<int>(history_.size()));
     for (int i = static_cast<int>(history_.size()) - 2; i >= static_cast<int>(history_.size()) - max_lookback; i -= 2) {
         if (history_[i].hash == hash_) {
             count++;
-            if (count >= 3) return true;
         }
     }
-    return false;
+    return count;
+}
+
+bool Board::is_threefold_repetition() const {
+    return repetition_count() >= 2;
 }
 
 bool Board::is_game_over() const {
