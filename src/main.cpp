@@ -106,6 +106,8 @@ int main(int argc, char* argv[]) {
             cfg.num_self_play_games = std::stoi(argv[++i]);
         } else if ((arg == "--simulations" || arg == "--num-simulations") && i + 1 < argc) {
             cfg.num_simulations = std::stoi(argv[++i]);
+        } else if ((arg == "--eval-sims" || arg == "--eval-simulations") && i + 1 < argc) {
+            cfg.eval_simulations = std::stoi(argv[++i]);
         } else if ((arg == "--eval-games" || arg == "--num-eval-games") && i + 1 < argc) {
             cfg.eval_games = std::stoi(argv[++i]);
         } else if (arg == "--eval-interval" && i + 1 < argc) {
@@ -264,7 +266,8 @@ int main(int argc, char* argv[]) {
 
     if (eval_only) {
         auto opponent = make_eval_opponent(cfg);
-        evaluator.evaluate_vs_bot(model, *opponent, cfg.eval_games, cfg.num_simulations);
+        int eval_sims = (cfg.eval_simulations > 0) ? cfg.eval_simulations : cfg.num_simulations;
+        evaluator.evaluate_vs_bot(model, *opponent, cfg.eval_games, eval_sims);
         return 0;
     }
 
@@ -301,7 +304,8 @@ int main(int argc, char* argv[]) {
         // 3. Evaluation
         if (iter % cfg.eval_interval == 0) {
             auto opponent = make_eval_opponent(cfg);
-            evaluator.evaluate_vs_bot(model, *opponent, cfg.eval_games, cfg.num_simulations);
+            int eval_sims = (cfg.eval_simulations > 0) ? cfg.eval_simulations : cfg.num_simulations;
+            evaluator.evaluate_vs_bot(model, *opponent, cfg.eval_games, eval_sims);
         }
 
         // 4. Save Checkpoint (model + optimizer + replay buffer)

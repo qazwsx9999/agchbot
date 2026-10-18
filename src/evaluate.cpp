@@ -76,7 +76,8 @@ EvalResult Evaluator::evaluate_vs_bot(ChessNet& model, Bot& bot, int num_games, 
     EvalResult result;
     auto openings = get_opening_book();
 
-    std::cout << "  [Eval] Playing " << num_games << " games vs bot ...\n";
+    std::cout << "  [Eval] Playing " << num_games << " games vs bot ("
+              << simulations << " MCTS sims/move) ...\n";
 
     int games_played = 0;
     size_t opening_idx = 0;

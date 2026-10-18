@@ -51,6 +51,7 @@ struct Config {
     int minimax_depth = 3;
     int eval_interval = 10;          // evaluate every N iterations
     int eval_games = 20;             // == Python num_eval_games
+    int eval_simulations = 0;        // 0 = default to num_simulations; >0 = custom MCTS sims for eval
 
     // ── Paths & device ──────────────────────────────────────────────
     std::string checkpoint_dir = "checkpoints";
