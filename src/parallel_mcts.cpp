@@ -188,11 +188,11 @@ std::pair<int, MCTSNode*> ParallelMCTS::select_child_vl(MCTSNode* node) const {
         int vc = child->visit_count.load(std::memory_order_relaxed);
         int vl = child->virtual_loss.load(std::memory_order_relaxed);
 
-        // Q with virtual loss: pretend in-flight visits all lost (value -1).
+        // Q with virtual loss: pretend in-flight visits all lost (value -1 from choosing player's view).
         float n = static_cast<float>(vc + vl);
         float q = (n > 0.0f)
             ? -((child->value_sum.load(std::memory_order_relaxed)
-                 - virtual_loss_ * vl) / n)
+                 + virtual_loss_ * vl) / n)
             : 0.0f;
 
         float u = c_puct_ * child->prior * sqrt_n / (1.0f + n);
