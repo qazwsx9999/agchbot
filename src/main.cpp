@@ -80,6 +80,127 @@ void run_interactive_play(az::ChessNet& model, const az::Config& cfg, torch::Dev
     std::cout << "Game Over! Result: " << board.result() << "\n";
 }
 
+void run_uci(az::ChessNet& model, const az::Config& cfg, torch::Device device) {
+    model->eval();
+    az::Board board;
+    az::ParallelMCTS pmcts(cfg);
+    az::MCTS mcts(cfg);
+
+    int current_sims = (cfg.num_simulations > 0) ? cfg.num_simulations : 800;
+    int search_threads = (cfg.search_threads > 1) ? cfg.search_threads : 4;
+
+    std::string line;
+    while (std::getline(std::cin, line)) {
+        if (line.empty()) continue;
+        std::istringstream iss(line);
+        std::string cmd;
+        if (!(iss >> cmd)) continue;
+
+        if (cmd == "uci") {
+            std::cout << "id name AlphaZero Chess C++\n";
+            std::cout << "id author AlphaZero Team\n";
+            std::cout << "option name Threads type spin default " << search_threads << " min 1 max 64\n";
+            std::cout << "option name Simulations type spin default " << current_sims << " min 10 max 100000\n";
+            std::cout << "uciok\n" << std::flush;
+        } else if (cmd == "isready") {
+            std::cout << "readyok\n" << std::flush;
+        } else if (cmd == "ucinewgame") {
+            board.reset();
+        } else if (cmd == "setoption") {
+            std::string name_token, opt_name, val_token;
+            iss >> name_token >> opt_name;
+            if (iss >> val_token) {
+                if (opt_name == "Threads") {
+                    int t;
+                    if (iss >> t) search_threads = std::max(1, t);
+                } else if (opt_name == "Simulations") {
+                    int s;
+                    if (iss >> s) current_sims = std::max(1, s);
+                }
+            }
+        } else if (cmd == "position") {
+            std::string pos_type;
+            iss >> pos_type;
+            if (pos_type == "startpos") {
+                board.reset();
+                std::string maybe_moves;
+                if (iss >> maybe_moves && maybe_moves == "moves") {
+                    std::string m_str;
+                    while (iss >> m_str) {
+                        auto legals = board.generate_legal_moves();
+                        for (const auto& lm : legals) {
+                            if (lm.to_uci() == m_str) {
+                                board.make_move(lm);
+                                break;
+                            }
+                        }
+                    }
+                }
+            } else if (pos_type == "fen") {
+                std::string fen;
+                std::string token;
+                std::vector<std::string> fen_parts;
+                while (iss >> token && token != "moves" && fen_parts.size() < 6) {
+                    fen_parts.push_back(token);
+                }
+                for (size_t p = 0; p < fen_parts.size(); ++p) {
+                    if (p > 0) fen += " ";
+                    fen += fen_parts[p];
+                }
+                board.set_fen(fen);
+                if (token == "moves") {
+                    std::string m_str;
+                    while (iss >> m_str) {
+                        auto legals = board.generate_legal_moves();
+                        for (const auto& lm : legals) {
+                            if (lm.to_uci() == m_str) {
+                                board.make_move(lm);
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        } else if (cmd == "go") {
+            std::string sub;
+            int sims = current_sims;
+            while (iss >> sub) {
+                if (sub == "nodes" || sub == "sims" || sub == "simulations") {
+                    int n;
+                    if (iss >> n) sims = std::max(1, n);
+                }
+            }
+
+            pmcts.set_num_simulations(sims);
+            mcts.set_num_simulations(sims);
+
+            std::vector<float> probs;
+            float root_q = 0.0f;
+            if (search_threads > 1) {
+                probs = pmcts.search(board, model, device, search_threads, false);
+                root_q = pmcts.last_root_value();
+            } else {
+                probs = mcts.search(board, model, device, false);
+                root_q = mcts.last_root_value();
+            }
+
+            int action = az::MCTS::select_action(probs, 0.0f);
+            az::Move best = az::decode_action(action, board);
+
+            float winrate = (root_q + 1.0f) * 0.5f;
+            int cp = static_cast<int>(root_q * 1000.0f);
+
+            std::cout << "info depth 10 nodes " << sims
+                      << " score cp " << cp
+                      << " winrate " << std::fixed << std::setprecision(4) << winrate
+                      << " pv " << best.to_uci() << "\n";
+            std::cout << "bestmove " << best.to_uci() << "\n" << std::flush;
+        } else if (cmd == "quit") {
+            break;
+        }
+    }
+}
+
 int main(int argc, char* argv[]) {
     // Unbuffered output so progress is visible even if the process dies or is
     // interrupted (also makes stdout/stderr appear immediately when piped).
@@ -90,6 +211,8 @@ int main(int argc, char* argv[]) {
     bool resume = false;
     bool eval_only = false;
     bool interactive_play = false;
+    bool uci_mode = false;
+    std::string custom_ckpt_path = "";
 
     // Command-line parsing
     for (int i = 1; i < argc; ++i) {
@@ -100,6 +223,10 @@ int main(int argc, char* argv[]) {
             eval_only = true;
         } else if (arg == "--play") {
             interactive_play = true;
+        } else if (arg == "--uci") {
+            uci_mode = true;
+        } else if ((arg == "--checkpoint" || arg == "--ckpt") && i + 1 < argc) {
+            custom_ckpt_path = argv[++i];
         } else if ((arg == "--iterations" || arg == "--num-iterations") && i + 1 < argc) {
             cfg.num_iterations = std::stoi(argv[++i]);
         } else if ((arg == "--games" || arg == "--num-self-play-games") && i + 1 < argc) {
@@ -153,9 +280,11 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    std::cout << "=========================================================\n";
-    std::cout << "  AlphaZero Chess C++ Engine (High-Performance Engine)   \n";
-    std::cout << "=========================================================\n";
+    if (!uci_mode) {
+        std::cout << "=========================================================\n";
+        std::cout << "  AlphaZero Chess C++ Engine (High-Performance Engine)   \n";
+        std::cout << "=========================================================\n";
+    }
 
     // Device selection ("auto" -> CUDA if available, else CPU; "cuda" falls back to CPU)
     torch::Device device(torch::kCPU);
@@ -164,10 +293,10 @@ int main(int argc, char* argv[]) {
         device = torch::Device(torch::kCUDA);
         cfg.device = "cuda";
         torch::set_num_threads(1);
-        std::cout << "  [System] Using GPU (CUDA Acceleration Enabled, LibTorch threads=1)\n";
+        (uci_mode ? std::cerr : std::cout) << "  [System] Using GPU (CUDA Acceleration Enabled, LibTorch threads=1)\n";
     } else {
         if (cfg.device == "cuda") {
-            std::cout << "  [WARNING] CUDA not available - falling back to CPU.\n";
+            (uci_mode ? std::cerr : std::cout) << "  [WARNING] CUDA not available - falling back to CPU.\n";
         }
         cfg.device = "cpu";
         int threads = (cfg.num_workers > 0) ? cfg.num_workers : static_cast<int>(std::thread::hardware_concurrency());
@@ -177,11 +306,28 @@ int main(int argc, char* argv[]) {
         } else {
             torch::set_num_threads(threads);
         }
-        std::cout << "  [System] Using CPU (" << threads << " worker threads configured)\n";
+        (uci_mode ? std::cerr : std::cout) << "  [System] Using CPU (" << threads << " worker threads configured)\n";
     }
 
     fs::create_directories(cfg.checkpoint_dir);
-    std::string ckpt_path = cfg.checkpoint_dir + "/" + cfg.checkpoint_filename;
+    std::string ckpt_path = custom_ckpt_path;
+    if (ckpt_path.empty()) {
+        std::vector<std::string> candidates = {
+            cfg.checkpoint_dir + "/" + cfg.checkpoint_filename,
+            "run_ckpt/checkpoint.pt",
+            "checkpoints/checkpoint.pt",
+            "model.pt"
+        };
+        for (const auto& c : candidates) {
+            if (fs::exists(c)) {
+                ckpt_path = c;
+                break;
+            }
+        }
+        if (ckpt_path.empty()) {
+            ckpt_path = cfg.checkpoint_dir + "/" + cfg.checkpoint_filename;
+        }
+    }
     std::string buffer_path = cfg.checkpoint_dir + "/replay_buffer.bin";
 
     az::ChessNet model(cfg);
@@ -242,21 +388,26 @@ int main(int argc, char* argv[]) {
     int start_iter = 1;
     int total_games = 0;
 
-    if (resume || eval_only || interactive_play) {
+    if (resume || eval_only || interactive_play || uci_mode) {
         if (fs::exists(ckpt_path)) {
-            std::cout << "  [System] Loading checkpoint from '" << ckpt_path << "' ...\n";
+            (uci_mode ? std::cerr : std::cout) << "  [System] Loading checkpoint from '" << ckpt_path << "' ...\n";
             start_iter = trainer.load_checkpoint(ckpt_path, total_games) + 1;
             model->to(device);
             if (fs::exists(buffer_path)) {
                 buffer.load(buffer_path);
             }
             sync_device_models(); // push loaded weights to the GPU copies
-            std::cout << "  [System] Resumed at iteration " << start_iter
+            (uci_mode ? std::cerr : std::cout) << "  [System] Resumed at iteration " << start_iter
                       << " (total games: " << total_games
                       << ", buffer: " << buffer.size() << " samples)\n";
         } else {
-            std::cout << "  [System] No checkpoint found at '" << ckpt_path << "', starting fresh.\n";
+            (uci_mode ? std::cerr : std::cout) << "  [System] No checkpoint found at '" << ckpt_path << "', starting fresh.\n";
         }
+    }
+
+    if (uci_mode) {
+        run_uci(model, cfg, device);
+        return 0;
     }
 
     if (interactive_play) {

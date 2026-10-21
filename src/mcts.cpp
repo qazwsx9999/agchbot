@@ -68,6 +68,8 @@ std::vector<float> MCTS::search(
         backprop(path, value);
     }
 
+    last_root_value_ = root->q_value();
+
     // Extract visit-count distribution
     std::vector<float> probs(NUM_ACTIONS, 0.0f);
     float total_visits = 0.0f;

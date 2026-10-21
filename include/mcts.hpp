@@ -62,11 +62,16 @@ public:
     // Pick action using temperature or argmax
     static int select_action(const std::vector<float>& probs, float temperature);
 
+    void set_num_simulations(int n) { num_simulations_ = n; }
+    int num_simulations() const { return num_simulations_; }
+    float last_root_value() const { return last_root_value_; }
+
 private:
     float c_puct_;
     int num_simulations_;
     float dirichlet_alpha_;
     float dirichlet_epsilon_;
+    float last_root_value_ = 0.0f;
 
     float expand(MCTSNode* node, const Board& board,
                  const std::vector<Move>& legal_moves,

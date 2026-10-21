@@ -160,6 +160,8 @@ std::vector<float> ParallelMCTS::search(
     queue_cv_.notify_all();
     eval_thread.join();
 
+    last_root_value_ = root->q_value();
+
     // Extract visit-count distribution (same contract as MCTS::search).
     std::vector<float> probs(NUM_ACTIONS, 0.0f);
     float total = 0.0f;

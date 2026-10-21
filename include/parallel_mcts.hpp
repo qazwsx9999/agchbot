@@ -48,6 +48,10 @@ public:
         bool add_noise
     );
 
+    void set_num_simulations(int n) { num_simulations_ = n; }
+    int num_simulations() const { return num_simulations_; }
+    float last_root_value() const { return last_root_value_; }
+
 private:
     struct EvalResult {
         std::vector<float> policy; // full 4672 policy (already softmaxed, CPU)
@@ -89,6 +93,7 @@ private:
     float dirichlet_epsilon_;
     float virtual_loss_;
     int max_batch_;
+    float last_root_value_ = 0.0f;
 
     // Shared eval queue (only used while a search() call is live).
     std::mutex queue_mutex_;
