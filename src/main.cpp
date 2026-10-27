@@ -253,6 +253,8 @@ int main(int argc, char* argv[]) {
             cfg.learning_rate = std::stof(argv[++i]);
         } else if (arg == "--num-epochs" && i + 1 < argc) {
             cfg.num_epochs = std::stoi(argv[++i]);
+        } else if ((arg == "--train-ratio" || arg == "--train-sample-ratio") && i + 1 < argc) {
+            cfg.train_sample_ratio = std::stof(argv[++i]);
         } else if (arg == "--max-game-length" && i + 1 < argc) {
             cfg.max_game_length = std::stoi(argv[++i]);
         } else if (arg == "--batch-size" && i + 1 < argc) {
@@ -430,20 +432,23 @@ int main(int argc, char* argv[]) {
         std::cout << "\n=== Iteration " << iter << "/" << cfg.num_iterations << " ===\n";
 
         // 1. Self-Play (multi-GPU splits the games across devices)
+        az::SelfPlayStats sp_stats;
         if (device.is_cuda() && n_devices > 1) {
-            az::SelfPlayEngine::generate_games_multi_gpu(
+            sp_stats = az::SelfPlayEngine::generate_games_multi_gpu(
                 device_models, devices, cfg, buffer,
                 cfg.num_self_play_games, sp_log_mutex);
         } else {
-            self_play.generate_games(model, buffer, cfg.num_self_play_games);
+            sp_stats = self_play.generate_games(model, buffer, cfg.num_self_play_games);
         }
         total_games += cfg.num_self_play_games;
 
         // 2. Training (gated on a minimum buffer size, like Python)
         int min_req = std::min(cfg.min_replay_buffer_size, cfg.batch_size);
         if (static_cast<int>(buffer.size()) >= min_req) {
-            std::cout << "  [Train] Training on " << buffer.size() << " samples ...\n";
-            auto stats = trainer.train_step(buffer);
+            size_t new_samples = static_cast<size_t>(std::max(0, sp_stats.total_samples));
+            std::cout << "  [Train] Training on buffer (" << buffer.size()
+                      << " total, " << new_samples << " new samples) ...\n";
+            auto stats = trainer.train_step(buffer, new_samples);
             sync_device_models(); // broadcast post-train weights to GPU copies
             std::cout << "  [Train] Loss: " << std::fixed << std::setprecision(4) << stats.total_loss
                       << " (policy: " << stats.policy_loss << ", value: " << stats.value_loss << ")\n";

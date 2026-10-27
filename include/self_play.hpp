@@ -17,6 +17,7 @@ struct SelfPlayStats {
     int white_wins = 0;
     int black_wins = 0;
     int draws = 0;
+    int total_samples = 0;
     float avg_moves = 0.0f;
 };
 

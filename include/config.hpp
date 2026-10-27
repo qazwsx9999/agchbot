@@ -38,8 +38,9 @@ struct Config {
     float learning_rate = 0.01f;
     float weight_decay = 1e-4f;
     float momentum = 0.9f;
-    int num_epochs = 1;              // epochs over the buffer per iteration
-    int replay_buffer_size = 50000;
+    int num_epochs = 1;              // epochs over the new samples per iteration
+    float train_sample_ratio = 2.0f; // target trained samples per newly generated sample
+    int replay_buffer_size = 200000;
     int min_replay_buffer_size = 2048;
 
     // ── Training loop ───────────────────────────────────────────────

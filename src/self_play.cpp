@@ -26,6 +26,33 @@ namespace az {
 
 namespace {
 
+const char* SELF_PLAY_OPENINGS[] = {
+    "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+    "rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq e6 0 2",
+    "rnbqkbnr/pp1ppppp/8/2p5/4P3/8/PPPP1PPP/RNBQKBNR w KQkq c6 0 2",
+    "rnbqkbnr/pppp1ppp/4p3/8/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2",
+    "rnbqkbnr/pp1ppppp/2p5/8/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2",
+    "rnbqkbnr/ppp1pppp/8/3p4/3P4/8/PPP1PPPP/RNBQKBNR w KQkq d6 0 2",
+    "rnbqkb1r/pppppppp/5n2/8/3P4/8/PPP1PPPP/RNBQKBNR w KQkq - 1 2",
+    "rnbqkbnr/pppp1ppp/8/4p3/2P5/8/PP1PPPPP/RNBQKBNR w KQkq e6 0 2",
+    "rnbqkbnr/ppp1pppp/8/3p4/8/5N2/PPPPPPPP/RNBQKB1R w KQkq d6 0 2",
+    "rnbqkbnr/ppp1pppp/8/3p4/4P3/8/PPPP1PPP/RNBQKBNR w KQkq d6 0 2",
+    "rnbqkbnr/ppppp1pp/8/5p2/3P4/8/PPP1PPPP/RNBQKBNR w KQkq f6 0 2",
+    "rnbqkb1r/pppppppp/5n2/8/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 1 2"
+};
+constexpr size_t NUM_SP_OPENINGS = sizeof(SELF_PLAY_OPENINGS) / sizeof(SELF_PLAY_OPENINGS[0]);
+
+void init_self_play_board(Board& board, int game_id) {
+    // 75% standard starting position, 25% diverse opening book positions
+    // so the network maintains accurate value/policy across all standard openings.
+    if (game_id % 4 == 0) {
+        size_t idx = static_cast<size_t>((game_id / 4) % NUM_SP_OPENINGS);
+        board.set_fen(SELF_PLAY_OPENINGS[idx]);
+    } else {
+        board.reset();
+    }
+}
+
 struct ActiveGame {
     int game_id;
     Board board;
@@ -38,7 +65,9 @@ struct ActiveGame {
     int move_count = 0;
     std::unique_ptr<MCTSNode> root;
 
-    explicit ActiveGame(int id) : game_id(id) {}
+    explicit ActiveGame(int id) : game_id(id) {
+        init_self_play_board(board, id);
+    }
 };
 
 void inject_dirichlet_noise(MCTSNode* root, float alpha, float epsilon) {
@@ -67,14 +96,28 @@ void inject_dirichlet_noise(MCTSNode* root, float alpha, float epsilon) {
 }
 
 std::pair<int, MCTSNode*> select_child_puct(MCTSNode* node, float c_puct) {
-    float sqrt_n = std::sqrt(static_cast<float>(node->visit_count));
+    int parent_visits = node->visit_count.load(std::memory_order_relaxed)
+                      + node->virtual_loss.load(std::memory_order_relaxed);
+    float sqrt_n = std::sqrt(static_cast<float>(std::max(1, parent_visits)));
+
+    // FPU Reduction: estimate unvisited children relative to parent's Q-value
+    float parent_q = node->q_value();
+    constexpr float fpu_reduction = 0.25f;
+    float fpu_value = std::max(-1.0f, parent_q - fpu_reduction);
+
     float best_score = -1e9f;
     int best_action = -1;
     MCTSNode* best_child = nullptr;
 
     for (const auto& [action, child] : node->children) {
-        float q = -child->q_value();
-        float u = c_puct * child->prior * sqrt_n / (1.0f + static_cast<float>(child->visit_count));
+        int vc = child->visit_count.load(std::memory_order_relaxed);
+        int vl = child->virtual_loss.load(std::memory_order_relaxed);
+        float n = static_cast<float>(vc + vl);
+
+        float q = (n > 0.0f)
+            ? -((child->value_sum.load(std::memory_order_relaxed) + static_cast<float>(vl)) / n)
+            : fpu_value;
+        float u = c_puct * child->prior * sqrt_n / (1.0f + n);
         float score = q + u;
         if (score > best_score) {
             best_score = score;
@@ -95,24 +138,14 @@ void backprop_path(std::vector<MCTSNode*>& path, float value) {
 }
 
 void apply_virtual_loss(const std::vector<MCTSNode*>& path) {
-    for (size_t i = 0; i < path.size(); ++i) {
-        path[i]->visit_count += 1;
-        if (i > 0) {
-            // Node path[i] was chosen by path[i-1].
-            // In select_child_puct: q = -child->q_value() = -child->value_sum / child->visit_count.
-            // Adding +1.0f to child->value_sum makes q = -1.0f (virtual loss from choosing player's view),
-            // discouraging select_child_puct from picking this child again during the current wave.
-            add_value_sum(path[i], 1.0f);
-        }
+    for (size_t i = 1; i < path.size(); ++i) {
+        path[i]->virtual_loss.fetch_add(1, std::memory_order_relaxed);
     }
 }
 
 void revert_virtual_loss(const std::vector<MCTSNode*>& path) {
-    for (size_t i = 0; i < path.size(); ++i) {
-        path[i]->visit_count -= 1;
-        if (i > 0) {
-            add_value_sum(path[i], -1.0f);
-        }
+    for (size_t i = 1; i < path.size(); ++i) {
+        path[i]->virtual_loss.fetch_sub(1, std::memory_order_relaxed);
     }
 }
 
@@ -262,19 +295,22 @@ SelfPlayStats SelfPlayEngine::generate_games_batched(ChessNet& model, ReplayBuff
                 at::autocast::set_autocast_enabled(at::kCUDA, true);
             }
 #endif
-            auto [logits, _] = model->forward(tensor);
+            auto [logits, values] = model->forward(tensor);
 #if HAS_AUTOCAST
             if (use_autocast) {
                 at::autocast::set_autocast_enabled(at::kCUDA, false);
             }
 #endif
             auto probs = torch::softmax(logits.to(torch::kFloat32), 1).to(torch::kCPU);
+            auto vals = values.to(torch::kFloat32).to(torch::kCPU);
             float* p_ptr = probs.data_ptr<float>();
+            float* v_ptr = vals.data_ptr<float>();
 
             for (size_t i = 0; i < n_exp; ++i) {
                 auto* g = need_root_expansion[i];
                 g->root = std::make_unique<MCTSNode>(0.0f);
                 float* game_policy = &p_ptr[i * NUM_ACTIONS];
+                float root_val = v_ptr[i];
 
                 auto legal_moves = g->board.generate_legal_moves();
                 if (!legal_moves.empty()) {
@@ -295,6 +331,7 @@ SelfPlayStats SelfPlayEngine::generate_games_batched(ChessNet& model, ReplayBuff
 
                     inject_dirichlet_noise(g->root.get(), config_.dirichlet_alpha, config_.dirichlet_epsilon);
                 }
+                add_value_sum(g->root.get(), root_val);
                 g->root->visit_count = 1;
             }
         }
@@ -523,6 +560,7 @@ SelfPlayStats SelfPlayEngine::generate_games_batched(ChessNet& model, ReplayBuff
         }
     }
 
+    stats.total_samples = total_moves;
     stats.avg_moves = (num_games > 0) ? (static_cast<float>(total_moves) / num_games) : 0.0f;
 
     std::cout << "  [Self-Play] Summary: White: " << stats.white_wins
@@ -602,6 +640,7 @@ SelfPlayStats SelfPlayEngine::generate_games_cpu(ChessNet& model, ReplayBuffer& 
     stats.white_wins = white_wins.load();
     stats.black_wins = black_wins.load();
     stats.draws = draws.load();
+    stats.total_samples = total_moves.load();
     stats.avg_moves = (num_games > 0) ? (static_cast<float>(total_moves.load()) / num_games) : 0.0f;
 
     std::cout << "  [Self-Play] Summary: White: " << stats.white_wins
@@ -673,9 +712,10 @@ SelfPlayStats SelfPlayEngine::generate_games_multi_gpu(
 
     int moves_sum = 0;
     for (int d = 0; d < n_dev; ++d) {
-        total.white_wins += per[d].white_wins;
-        total.black_wins += per[d].black_wins;
-        total.draws      += per[d].draws;
+        total.white_wins    += per[d].white_wins;
+        total.black_wins    += per[d].black_wins;
+        total.draws         += per[d].draws;
+        total.total_samples += per[d].total_samples;
         int share = base + (d == 0 ? rem : 0);
         moves_sum += static_cast<int>(per[d].avg_moves * share + 0.5f);
     }

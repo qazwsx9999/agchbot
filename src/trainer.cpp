@@ -16,14 +16,24 @@ Trainer::Trainer(ChessNet& model, const Config& cfg, torch::Device device)
     optimizer_ = std::make_unique<torch::optim::SGD>(model_->parameters(), options);
 }
 
-TrainStats Trainer::train_step(ReplayBuffer& buffer) {
+TrainStats Trainer::train_step(ReplayBuffer& buffer, size_t new_samples) {
     c10::DeviceGuard guard(device_);
     model_->to(device_);
     model_->train();
 
     size_t batch_size = config_.batch_size;
     size_t num_samples = buffer.size();
-    size_t steps_per_epoch = std::max(size_t(1), num_samples / batch_size);
+
+    // Scale training steps to newly generated samples (e.g. 2x new_samples)
+    // rather than iterating over the entire replay buffer every iteration,
+    // preventing 12x+ over-training and value-head memorization.
+    size_t target_samples = num_samples;
+    if (new_samples > 0 && config_.train_sample_ratio > 0.0f) {
+        size_t scaled = static_cast<size_t>(static_cast<float>(new_samples) * config_.train_sample_ratio);
+        target_samples = std::min(num_samples, std::max(batch_size, scaled));
+    }
+
+    size_t steps_per_epoch = std::max(size_t(1), target_samples / batch_size);
     int epochs = std::max(1, config_.num_epochs);
 
     float sum_total_loss = 0.0f;
@@ -113,6 +123,14 @@ int Trainer::load_checkpoint(const std::string& path, int& out_total_games) {
                 torch::serialize::InputArchive opt_archive;
                 opt_archive.load_from(opt_path, device_);
                 optimizer_->load(opt_archive);
+                // Re-apply configured hyperparameters (e.g. CLI --learning-rate)
+                // so saved .opt state does not override new learning rate settings.
+                for (auto& group : optimizer_->param_groups()) {
+                    auto& opts = static_cast<torch::optim::SGDOptions&>(group.options());
+                    opts.lr(config_.learning_rate);
+                    opts.momentum(config_.momentum);
+                    opts.weight_decay(config_.weight_decay);
+                }
             } catch (const std::exception& e) {
                 std::cerr << "Warning: Could not restore optimizer momentum: " << e.what() << "\n";
             }

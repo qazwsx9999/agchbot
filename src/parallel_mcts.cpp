@@ -117,12 +117,14 @@ std::vector<float> ParallelMCTS::search(
             std::memcpy(pol.data(), probs.data_ptr<float>(),
                         NUM_ACTIONS * sizeof(float));
             float v = value_t.item<float>();
+            r->leaf->raw_value.store(v, std::memory_order_relaxed);
             insert_children(r->leaf, r->actions, pol.data());
             r->leaf->expand_state.store(2, std::memory_order_release);
             EvalResult res{std::move(pol), v};
             r->promise->set_value(std::move(res));
         }
-        future.get();
+        EvalResult root_res = future.get();
+        add_value_sum(root.get(), root_res.value);
     }
 
     if (root->children.empty()) {
@@ -178,9 +180,14 @@ std::vector<float> ParallelMCTS::search(
 
 // ── PUCT select with virtual loss ────────────────────────────────────────
 std::pair<int, MCTSNode*> ParallelMCTS::select_child_vl(MCTSNode* node) const {
-    float sqrt_n = std::sqrt(static_cast<float>(
-        node->visit_count.load(std::memory_order_relaxed)
-        + node->virtual_loss.load(std::memory_order_relaxed)));
+    int parent_visits = node->visit_count.load(std::memory_order_relaxed)
+                      + node->virtual_loss.load(std::memory_order_relaxed);
+    float sqrt_n = std::sqrt(static_cast<float>(std::max(1, parent_visits)));
+
+    // FPU Reduction: estimate unvisited children relative to parent's Q-value
+    float parent_q = node->q_value();
+    constexpr float fpu_reduction = 0.25f;
+    float fpu_value = std::max(-1.0f, parent_q - fpu_reduction);
 
     float best_score = -1e9f;
     int best_action = -1;
@@ -195,7 +202,7 @@ std::pair<int, MCTSNode*> ParallelMCTS::select_child_vl(MCTSNode* node) const {
         float q = (n > 0.0f)
             ? -((child->value_sum.load(std::memory_order_relaxed)
                  + virtual_loss_ * vl) / n)
-            : 0.0f;
+            : fpu_value;
 
         float u = c_puct_ * child->prior * sqrt_n / (1.0f + n);
         float score = q + u;
@@ -386,6 +393,7 @@ void ParallelMCTS::eval_thread_fn(ChessNet& model, torch::Device device) {
             float val = v_ptr[i];
 
             insert_children(req->leaf, req->actions, leaf_policy);
+            req->leaf->raw_value.store(val, std::memory_order_relaxed);
             req->leaf->expand_state.store(2, std::memory_order_release);
 
             std::vector<float> pol(NUM_ACTIONS);

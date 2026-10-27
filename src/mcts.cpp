@@ -23,7 +23,7 @@ std::vector<float> MCTS::search(
     auto root = std::make_unique<MCTSNode>(0.0f);
 
     // Initial root expansion
-    expand(root.get(), board, board.generate_legal_moves(), model, device);
+    float root_value = expand(root.get(), board, board.generate_legal_moves(), model, device);
     if (root->children.empty()) {
         return std::vector<float>(NUM_ACTIONS, 0.0f);
     }
@@ -32,6 +32,7 @@ std::vector<float> MCTS::search(
         inject_noise(root.get());
     }
 
+    add_value_sum(root.get(), root_value);
     root->visit_count = 1;
 
     for (int sim = 0; sim < num_simulations_; ++sim) {
@@ -126,14 +127,22 @@ float MCTS::expand(MCTSNode* node, const Board& board,
 }
 
 std::pair<int, MCTSNode*> MCTS::select_child(MCTSNode* node) {
-    float sqrt_n = std::sqrt(static_cast<float>(node->visit_count));
+    int parent_visits = node->visit_count.load(std::memory_order_relaxed);
+    float sqrt_n = std::sqrt(static_cast<float>(std::max(1, parent_visits)));
+
+    // FPU Reduction: estimate unvisited children relative to parent's Q-value
+    float parent_q = node->q_value();
+    constexpr float fpu_reduction = 0.25f;
+    float fpu_value = std::max(-1.0f, parent_q - fpu_reduction);
+
     float best_score = -1e9f;
     int best_action = -1;
     MCTSNode* best_child = nullptr;
 
     for (const auto& [action, child] : node->children) {
-        float q = -child->q_value(); // Flip sign: parent maximizes
-        float u = c_puct_ * child->prior * sqrt_n / (1.0f + static_cast<float>(child->visit_count));
+        int child_visits = child->visit_count.load(std::memory_order_relaxed);
+        float q = (child_visits > 0) ? (-child->q_value()) : fpu_value;
+        float u = c_puct_ * child->prior * sqrt_n / (1.0f + static_cast<float>(child_visits));
         float score = q + u;
         if (score > best_score) {
             best_score = score;

@@ -13,6 +13,7 @@ namespace az {
 struct MCTSNode {
     std::atomic<int> visit_count{0};
     std::atomic<float> value_sum{0.0f};
+    std::atomic<float> raw_value{0.0f};
     float prior = 0.0f;
     // Virtual loss: number of in-flight (being-evaluated) visits on this node.
     // Used by ParallelMCTS to discourage sibling worker threads from picking
@@ -30,7 +31,7 @@ struct MCTSNode {
 
     float q_value() const {
         int vc = visit_count.load(std::memory_order_relaxed);
-        return (vc == 0) ? 0.0f
+        return (vc == 0) ? raw_value.load(std::memory_order_relaxed)
                         : (value_sum.load(std::memory_order_relaxed)
                            / static_cast<float>(vc));
     }

@@ -17,7 +17,7 @@ class Trainer {
 public:
     Trainer(ChessNet& model, const Config& cfg, torch::Device device);
 
-    TrainStats train_step(ReplayBuffer& buffer);
+    TrainStats train_step(ReplayBuffer& buffer, size_t new_samples = 0);
 
     void save_checkpoint(const std::string& path, int iteration, int total_games);
     int load_checkpoint(const std::string& path, int& out_total_games);
