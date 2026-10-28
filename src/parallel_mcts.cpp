@@ -246,11 +246,9 @@ void ParallelMCTS::worker_loop(
         path.push_back(node);
 
         // SELECT — descend while the node is fully expanded (expand_state==2)
-        // and the scratch game isn't over by draw rules. is_game_over_fast()
-        // skips the expensive full check — a node with children is guaranteed
-        // non-terminal anyway; the leaf gets the full check via legal_moves.
+        // and the scratch game isn't over by draw/repetition rules.
         while (node->expand_state.load(std::memory_order_acquire) == 2
-               && !scratch.is_game_over_fast()) {
+               && !(path.size() > 1 && (scratch.is_game_over_fast() || scratch.repetition_count() >= 1))) {
             auto [action, child] = select_child_vl(node);
             if (child == nullptr) break;
             child->virtual_loss.fetch_add(1, std::memory_order_relaxed);
@@ -260,18 +258,20 @@ void ParallelMCTS::worker_loop(
         }
 
         float value = 0.0f;
-        if (scratch.is_game_over_fast()) {
+        if (path.size() > 1 && (scratch.is_game_over_fast() || scratch.repetition_count() >= 1)) {
             value = 0.0f;
-        } else if (node->expand_state.load(std::memory_order_acquire) == 0) {
-            // Unexpanded leaf: try to own the expansion.
+        } else {
+            // Try to own expansion if unexpanded (0 -> 1); if a sibling is
+            // currently expanding (state == 1), wait for it to finish.
             uint8_t expected = 0;
             if (node->expand_state.compare_exchange_strong(
                     expected, 1,
                     std::memory_order_acquire, std::memory_order_acquire)) {
                 auto legal = scratch.generate_legal_moves();
                 if (legal.empty()) {
-                    // Terminal: checkmate -> -1.0f (side to move lost), stalemate -> 0.0f (draw)
-                    value = scratch.is_in_check() ? -1.0f : 0.0f;
+                    int depth = std::max(1, static_cast<int>(path.size()) - 1);
+                    value = scratch.is_in_check() ? -(1.5f + 0.5f / static_cast<float>(depth)) : 0.0f;
+                    node->raw_value.store(value, std::memory_order_relaxed);
                     node->expand_state.store(0, std::memory_order_release);
                 } else {
                     // We own the expansion — compute actions and
@@ -296,21 +296,13 @@ void ParallelMCTS::worker_loop(
                     value = res.value;
                 }
             } else {
-                // Someone else is expanding the same leaf: wait briefly then
-                // this sim counts as done (a cheap, deadlock-free choice —
-                // its sibling's result is about to land anyway).
+                // Another worker is expanding (state == 1) or already expanded:
+                // wait until expansion finishes so raw_value / q_value is valid.
                 while (node->expand_state.load(std::memory_order_acquire) == 1) {
                     std::this_thread::yield();
                 }
-                // Leaf is now expanded by the sibling; count this sim with the
-                // leaf's (just-published) value estimate.
                 value = node->q_value();
             }
-        } else {
-            // expand_state == 2 but select loop ended (expanded node with no
-            // selectable child — essentially unreachable). Value from this
-            // node's own perspective matches the backprop convention.
-            value = node->q_value();
         }
 
         backprop_and_release(path, value);

@@ -357,7 +357,8 @@ SelfPlayStats SelfPlayEngine::generate_games_batched(ChessNet& model, ReplayBuff
                     std::vector<MCTSNode*> path;
                     path.push_back(node);
 
-                    while (!node->children.empty() && !scratch.is_game_over_fast()) {
+                    while (!node->children.empty()
+                           && !(path.size() > 1 && (scratch.is_game_over_fast() || scratch.repetition_count() >= 1))) {
                         auto [action, child] = select_child_puct(node, config_.c_puct);
                         if (!child) break;
                         scratch.make_move(decode_action(action, scratch));
@@ -367,7 +368,7 @@ SelfPlayStats SelfPlayEngine::generate_games_batched(ChessNet& model, ReplayBuff
 
                     apply_virtual_loss(path);
 
-                    if (scratch.is_game_over_fast()) {
+                    if (path.size() > 1 && (scratch.is_game_over_fast() || scratch.repetition_count() >= 1)) {
                         revert_virtual_loss_and_backprop(path, 0.0f);
                         continue;
                     }
@@ -378,7 +379,7 @@ SelfPlayStats SelfPlayEngine::generate_games_batched(ChessNet& model, ReplayBuff
                         if (le.leaf_node == node) {
                             existing = &le;
                             break;
-                        }
+                         }
                     }
 
                     if (existing != nullptr) {
@@ -389,8 +390,9 @@ SelfPlayStats SelfPlayEngine::generate_games_batched(ChessNet& model, ReplayBuff
                     if (node->children.empty()) {
                         auto legal = scratch.generate_legal_moves();
                         if (legal.empty()) {
-                            // Terminal: checkmate -> -1.0f (side to move lost), stalemate -> 0.0f (draw)
-                            float val = scratch.is_in_check() ? -1.0f : 0.0f;
+                            // Terminal: checkmate with mate-distance bonus, stalemate -> 0.0f (draw)
+                            int depth = std::max(1, static_cast<int>(path.size()) - 1);
+                            float val = scratch.is_in_check() ? -(1.5f + 0.5f / static_cast<float>(depth)) : 0.0f;
                             revert_virtual_loss_and_backprop(path, val);
                             continue;
                         }

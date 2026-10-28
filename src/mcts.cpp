@@ -41,11 +41,11 @@ std::vector<float> MCTS::search(
         std::vector<MCTSNode*> path;
         path.push_back(node);
 
-        // SELECT: Traverse down the tree. A node with children is guaranteed
-        // to have legal moves, so the expensive full is_game_over() check is
-        // replaced by the draw-rules-only fast check — mate/stalemate can only
-        // occur at the leaf, which is tested below exactly once.
-        while (!node->children.empty() && !scratch.is_game_over_fast()) {
+        // SELECT: Traverse down the tree. Any position repeated inside the
+        // search tree (path.size() > 1 && repetition_count() >= 1) is treated
+        // as a 0.0 draw so the bot never shuffles its king back and forth when winning.
+        while (!node->children.empty()
+               && !(path.size() > 1 && (scratch.is_game_over_fast() || scratch.repetition_count() >= 1))) {
             auto [action, child] = select_child(node);
             Move m = decode_action(action, scratch);
             scratch.make_move(m);
@@ -54,12 +54,13 @@ std::vector<float> MCTS::search(
         }
 
         float value = 0.0f;
-        if (scratch.is_game_over_fast()) {
+        if (path.size() > 1 && (scratch.is_game_over_fast() || scratch.repetition_count() >= 1)) {
             value = 0.0f;
         } else if (node->children.empty()) {
             auto legal = scratch.generate_legal_moves();
             if (legal.empty()) {
-                value = scratch.is_in_check() ? -1.0f : 0.0f;
+                int depth = std::max(1, static_cast<int>(path.size()) - 1);
+                value = scratch.is_in_check() ? -(1.5f + 0.5f / static_cast<float>(depth)) : 0.0f;
             } else {
                 value = expand(node, scratch, legal, model, device);
             }
