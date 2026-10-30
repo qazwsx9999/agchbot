@@ -270,7 +270,7 @@ void ParallelMCTS::worker_loop(
                 auto legal = scratch.generate_legal_moves();
                 if (legal.empty()) {
                     int depth = std::max(1, static_cast<int>(path.size()) - 1);
-                    value = scratch.is_in_check() ? -(1.5f + 0.5f / static_cast<float>(depth)) : 0.0f;
+                    value = scratch.is_in_check() ? (-1.001f + 0.001f * static_cast<float>(depth)) : 0.0f;
                     node->raw_value.store(value, std::memory_order_relaxed);
                     node->expand_state.store(0, std::memory_order_release);
                 } else {

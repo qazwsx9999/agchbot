@@ -392,7 +392,7 @@ SelfPlayStats SelfPlayEngine::generate_games_batched(ChessNet& model, ReplayBuff
                         if (legal.empty()) {
                             // Terminal: checkmate with mate-distance bonus, stalemate -> 0.0f (draw)
                             int depth = std::max(1, static_cast<int>(path.size()) - 1);
-                            float val = scratch.is_in_check() ? -(1.5f + 0.5f / static_cast<float>(depth)) : 0.0f;
+                            float val = scratch.is_in_check() ? (-1.001f + 0.001f * static_cast<float>(depth)) : 0.0f;
                             revert_virtual_loss_and_backprop(path, val);
                             continue;
                         }

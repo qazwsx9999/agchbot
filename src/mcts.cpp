@@ -60,7 +60,7 @@ std::vector<float> MCTS::search(
             auto legal = scratch.generate_legal_moves();
             if (legal.empty()) {
                 int depth = std::max(1, static_cast<int>(path.size()) - 1);
-                value = scratch.is_in_check() ? -(1.5f + 0.5f / static_cast<float>(depth)) : 0.0f;
+                value = scratch.is_in_check() ? (-1.001f + 0.001f * static_cast<float>(depth)) : 0.0f;
             } else {
                 value = expand(node, scratch, legal, model, device);
             }
